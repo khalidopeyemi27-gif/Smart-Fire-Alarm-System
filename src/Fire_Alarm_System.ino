@@ -43,6 +43,7 @@ WidgetTerminal terminal(V5);
 // =====================================================
 // CALIBRATED SENSOR THRESHOLDS
 // =====================================================
+const int MQ2_BASELINE_ADC = 717;            // Calibrated clean-air baseline
 const int SMOKE_THRESHOLD = 1017;           // Calibrated MQ-2 alarm trigger
 const int SMOKE_CLEAR_THRESHOLD = 917;       // Calibrated MQ-2 clear trigger
 const int SMOKE_CONFIRMATIONS = 3;           // Alarm debounce count
@@ -72,18 +73,33 @@ const unsigned long LCD_INTERVAL = 1000;
 // Global Sensor Values
 float globalTemp = 0.0;
 float globalHum = 0.0;
-int globalSmoke = 0;
+int globalSmokeADC = 0;
+int globalSmokePercent = 0;
 bool globalFlame = false;
 bool globalDhtValid = false;
 bool globalHighTemp = false;
 bool globalFireDetected = false;
 
 // Function Declarations
+int getSmokePercentage(int rawADC);
 void updateSmokeAlarm(int smokeValue);
 void updateBuzzer(bool alarm);
 void processSensors();
 void updateLCD();
 void printHelp();
+
+// =====================================================
+// CONVERT MQ-2 ADC TO SMOKE PERCENTAGE (0% - 100%)
+// =====================================================
+int getSmokePercentage(int rawADC) {
+  const int MAX_ADC = 4095; // ESP32-S3 12-bit ADC Max
+
+  if (rawADC <= MQ2_BASELINE_ADC) return 0;
+  if (rawADC >= MAX_ADC) return 100;
+
+  // Map calibrated range above clean-air baseline to 0-100%
+  return map(rawADC, MQ2_BASELINE_ADC, MAX_ADC, 0, 100);
+}
 
 // =====================================================
 // SETUP FUNCTION
@@ -186,9 +202,10 @@ void updateBuzzer(bool alarm) {
 // MAIN SENSOR PROCESSING (Runs Every 1 Second)
 // =====================================================
 void processSensors() {
-  // 1. Read MQ-2 Smoke Sensor Analog Value
-  globalSmoke = analogRead(MQ2_PIN);
-  updateSmokeAlarm(globalSmoke);
+  // 1. Read MQ-2 Smoke Sensor ADC & Calculate Percentage
+  globalSmokeADC = analogRead(MQ2_PIN);
+  globalSmokePercent = getSmokePercentage(globalSmokeADC);
+  updateSmokeAlarm(globalSmokeADC);
 
   // 2. Read IR Flame Sensor Digital Value (LOW = Flame Detected)
   int flameState = digitalRead(FLAME_PIN);
@@ -222,9 +239,9 @@ void processSensors() {
   // ---------------------------------------------------
   // STREAM LIVE DATA TO BLYNK DASHBOARD
   // ---------------------------------------------------
-  if (globalDhtValid) Blynk.virtualWrite(V0, globalTemp); // V0: Temperature
-  Blynk.virtualWrite(V1, globalSmoke);                    // V1: Smoke ADC
-  Blynk.virtualWrite(V2, globalFlame ? 1 : 0);            // V2: Flame Binary State
+  if (globalDhtValid) Blynk.virtualWrite(V0, globalTemp); // V0: Temp (°C)
+  Blynk.virtualWrite(V1, globalSmokePercent);             // V1: Smoke (%)
+  Blynk.virtualWrite(V2, globalFlame ? 1 : 0);            // V2: Flame State
 
   // Detect Emergency State Transitions for App Logging & Events
   if (globalFireDetected && !lastFireState) {
@@ -232,8 +249,8 @@ void processSensors() {
     if (!manualMute) {
       Blynk.virtualWrite(V4, "🔥 FIRE ALERT DETECTED!");
       terminal.println(F("[CRITICAL] Fire hazard detected!"));
-      terminal.print(F("Smoke ADC: ")); terminal.print(globalSmoke);
-      terminal.print(F(" | Temp: ")); terminal.print(globalTemp, 1);
+      terminal.print(F("Smoke Level: ")); terminal.print(globalSmokePercent); terminal.print(F("% (ADC ")); terminal.print(globalSmokeADC); terminal.println(F(")"));
+      terminal.print(F("Temp: ")); terminal.print(globalTemp, 1);
       terminal.print(F("C | Flame: ")); terminal.println(globalFlame ? "YES" : "NO");
       terminal.flush();
 
@@ -250,7 +267,7 @@ void processSensors() {
 
   // Output Live Diagnostics to Serial Monitor
   Serial.println(F("--------------------------------"));
-  Serial.print(F("Smoke ADC:    ")); Serial.println(globalSmoke);
+  Serial.print(F("Smoke Level:  ")); Serial.print(globalSmokePercent); Serial.print(F("%  (ADC: ")); Serial.print(globalSmokeADC); Serial.println(F(")"));
   Serial.print(F("Flame IR:     ")); Serial.println(globalFlame ? "DETECTED" : "CLEAR");
   if (globalDhtValid) {
     Serial.print(F("Temp:         ")); Serial.print(globalTemp, 1); Serial.println(F(" °C"));
@@ -292,7 +309,7 @@ BLYNK_WRITE(V5) {
     if (globalDhtValid) { terminal.print(globalTemp, 1); terminal.println(F(" °C")); }
     else { terminal.println(F("DHT ERROR")); }
     
-    terminal.print(F("Smoke ADC:   ")); terminal.println(globalSmoke);
+    terminal.print(F("Smoke Level: ")); terminal.print(globalSmokePercent); terminal.print(F("% (ADC ")); terminal.print(globalSmokeADC); terminal.println(F(")"));
     terminal.print(F("Flame IR:    ")); terminal.println(globalFlame ? "DETECTED!" : "SAFE");
     terminal.print(F("LED Reading: ")); terminal.println(globalFireDetected ? "RED (ALARM)" : "GREEN (SAFE)");
   } 
@@ -341,13 +358,13 @@ void updateLCD() {
       if (globalFlame) {
         lcd.print("FLAME DETECTED");
       } else if (smokeAlarm) {
-        lcd.print("SMOKE DETECTED");
+        lcd.print("SMOKE: "); lcd.print(globalSmokePercent); lcd.print("%");
       } else if (globalHighTemp) {
         lcd.print("HIGH TEMP");
       }
     } else {
       lcd.setCursor(0, 0);
-      lcd.print("SYSTEM NORMAL");
+      lcd.print("Smoke: "); lcd.print(globalSmokePercent); lcd.print("%");
       lcd.setCursor(0, 1);
 
       if (globalDhtValid) {
